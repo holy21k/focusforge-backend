@@ -1,44 +1,34 @@
 from pydantic import BaseModel, Field
-from datetime import datetime
-from typing import Optional, Any
+from datetime import datetime, date, time
+from typing import Optional
 from enum import Enum
 
+
 class HabitFrequency(str, Enum):
-    DAILY = "daily"
-    WEEKLY = "weekly"
-    MONTHLY = "monthly"
+    daily = "daily"
+    weekly = "weekly"
+    monthly = "monthly"
+
 
 class Habit(BaseModel):
-    id: Optional[Any] = None
+    id: Optional[str] = None
+    user_id: str
+
     name: str
     description: Optional[str] = None
-    frequency: HabitFrequency = HabitFrequency.DAILY
+
+    frequency: HabitFrequency
     target_count: int = 1
-    current_streak: int = 0
-    longest_streak: int = 0
-    user_id: str
-    created_at: datetime = Field(default_factory=datetime.now)
+
+    start_date: date
+    end_date: Optional[date] = None
+
+    time_window_start: time
+    time_window_end: time
+    timezone: str = "Africa/Addis_Ababa"
+
     is_active: bool = True
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
     class Config:
-        arbitrary_types_allowed = True
-
-class HabitLog(BaseModel):
-    habit_id: str
-    user_id: str
-    completed_date: datetime = Field(default_factory=datetime.now)  # FIX: Changed to datetime
-    completed: bool = True
-    notes: Optional[str] = None
-
-class HabitCreate(BaseModel):
-    name: str
-    description: Optional[str] = None
-    frequency: HabitFrequency = HabitFrequency.DAILY
-    target_count: int = 1
-
-class HabitUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    frequency: Optional[HabitFrequency] = None
-    target_count: Optional[int] = None
-    is_active: Optional[bool] = None
+        from_attributes = True

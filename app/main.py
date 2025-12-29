@@ -1,13 +1,19 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from apscheduler.schedulers.background import BackgroundScheduler
+
 from app.database import init_db
 from app.routes import task_routes, habit_routes, auth_routes
+from app.scheduler.habit_scheduler import run_daily_habit_check
 
+# --------------------------------------------------
+# APP INIT
+# --------------------------------------------------
 app = FastAPI(title="FocusForge API", version="1.0.0")
 
-# -----------------------------
-# CORS FIX
-# -----------------------------
+# --------------------------------------------------
+# CORS
+# --------------------------------------------------
 origins = [
     "http://localhost:5173",   # Vite frontend
     "http://127.0.0.1:5173",
@@ -15,30 +21,55 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,       # Allow frontend
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],         # Allow all methods
-    allow_headers=["*"],         # Allow all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# -----------------------------
+# --------------------------------------------------
 # ROUTES
-# -----------------------------
+# --------------------------------------------------
 app.include_router(auth_routes, prefix="/api/v1")
 app.include_router(task_routes, prefix="/api/v1")
 app.include_router(habit_routes, prefix="/api/v1")
 
-# -----------------------------
-# STARTUP EVENT
-# -----------------------------
+# --------------------------------------------------
+# SCHEDULER (CORE SYSTEM ENGINE)
+# --------------------------------------------------
+scheduler = BackgroundScheduler(timezone="UTC")
+
+scheduler.add_job(
+    run_daily_habit_check,
+    trigger="cron",
+    hour=0,
+    minute=0,
+    id="daily_habit_enforcer",
+    replace_existing=True
+)
+
+# --------------------------------------------------
+# STARTUP / SHUTDOWN
+# --------------------------------------------------
 @app.on_event("startup")
 async def startup_event():
     await init_db()
+    scheduler.start()
+    print("✅ Scheduler started")
+    print("✅ FocusForge backend ready")
 
-# -----------------------------
-# ROOT ROUTE
-# -----------------------------
+@app.on_event("shutdown")
+async def shutdown_event():
+    scheduler.shutdown()
+    print("🛑 Scheduler stopped")
+
+# --------------------------------------------------
+# HEALTH CHECK
+# --------------------------------------------------
 @app.get("/")
 async def root():
-    return {"message": "FocusForge Backend Running", "status": "healthy"}
-
+    return {
+        "message": "FocusForge Backend Running",
+        "status": "healthy",
+        "scheduler": "active"
+    }
