@@ -15,7 +15,9 @@ app = FastAPI(title="FocusForge API", version="1.0.0")
 # CORS
 # --------------------------------------------------
 origins = [
-    "http://localhost:5173",   # Vite frontend
+    "http://localhost:3000",   # React dev server
+    "http://127.0.0.1:3000",
+    "http://localhost:5173",   # Vite frontend (if any)
     "http://127.0.0.1:5173",
 ]
 
@@ -23,8 +25,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],  # allows GET, POST, OPTIONS, etc.
+    allow_headers=["*"],  # allows Content-Type, Authorization, etc.
 )
 
 # --------------------------------------------------
