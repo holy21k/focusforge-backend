@@ -237,13 +237,13 @@ def predict_success(habit_id: str, user_id: str, scheduled_date: date = None) ->
     Args:
     habit_id: The habit ID
     user_id: The user ID
-    scheduled_date: Optional date to predict for (defaults to today)
+    scheduled_date: Optional date to predict for (defaults to today UTC)
     
     Returns:
     dict with prediction and probability
     """
     if scheduled_date is None:
-        scheduled_date = date.today()
+        scheduled_date = datetime.utcnow().date()
     
     db = get_database()
     
@@ -270,7 +270,7 @@ def predict_success(habit_id: str, user_id: str, scheduled_date: date = None) ->
         historical_rate = completed_count / len(occurrences)
     
     # Build occurrence-like dict for feature extraction
-    due_start = datetime.combine(scheduled_date, habit.get("time_window_start", datetime.min.time()))
+    due_start = datetime.combine(scheduled_date, habit.get("time_window_start", datetime.min.time()).time() if hasattr(habit.get("time_window_start"), "time") else datetime.min.time())
     
     occ = {
         "scheduled_date": scheduled_date,
@@ -422,4 +422,203 @@ def get_difficult_days(habit_id: str, user_id: str) -> dict:
     return {
         "difficult_days": difficult_days,
         "analysis": "Days with completion rate below 70%"
+    }
+
+
+# ===============================
+# TASK COMPLETION PATTERNS (AI Learning)
+# ===============================
+
+def analyze_task_completion_patterns(user_id: str, days: int = 30) -> dict:
+    """
+    Analyze task completion patterns for AI learning.
+    
+    This helps the AI understand:
+    - When the user tends to complete tasks
+    - Which days tasks are most often missed
+    - Task completion time patterns
+    """
+    db = get_database()
+    
+    # Get tasks from the last N days
+    cutoff_date = datetime.utcnow() - timedelta(days=days)
+    
+    tasks = list(db.tasks.find({
+        "user_id": user_id,
+        "created_at": {"$gte": cutoff_date}
+    }))
+    
+    if not tasks:
+        return {"error": "No task data available"}
+    
+    total = len(tasks)
+    completed = sum(1 for t in tasks if t.get("is_completed"))
+    missed = sum(1 for t in tasks if t.get("is_missed"))
+    
+    # Day of week analysis
+    day_stats = {i: {"completed": 0, "missed": 0, "pending": 0} for i in range(7)}
+    day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    
+    # Completion time analysis
+    completion_hours = []
+    
+    for task in tasks:
+        due_date = task.get("due_date")
+        if isinstance(due_date, str):
+            due_date = datetime.fromisoformat(due_date.replace('Z', '+00:00')).date()
+        elif hasattr(due_date, 'date'):
+            due_date = due_date.date()
+        
+        day = due_date.weekday()
+        
+        if task.get("is_completed"):
+            day_stats[day]["completed"] += 1
+            
+            # Track completion time
+            completed_at = task.get("completed_at")
+            if completed_at:
+                if isinstance(completed_at, str):
+                    completed_at = datetime.fromisoformat(completed_at.replace('Z', '+00:00'))
+                completion_hours.append(completed_at.hour)
+        elif task.get("is_missed"):
+            day_stats[day]["missed"] += 1
+        else:
+            day_stats[day]["pending"] += 1
+    
+    # Calculate completion rate by day
+    day_completion_rates = []
+    for day, stats in day_stats.items():
+        total_day = stats["completed"] + stats["missed"] + stats["pending"]
+        if total_day > 0:
+            rate = stats["completed"] / total_day
+            day_completion_rates.append({
+                "day": day_names[day],
+                "completion_rate": round(rate, 2),
+                "completed": stats["completed"],
+                "missed": stats["missed"],
+                "total": total_day
+            })
+    
+    day_completion_rates.sort(key=lambda x: x["completion_rate"], reverse=True)
+    
+    # Best and worst days
+    best_day = day_completion_rates[0] if day_completion_rates else None
+    worst_day = day_completion_rates[-1] if day_completion_rates else None
+    
+    # Completion time pattern
+    avg_completion_hour = None
+    if completion_hours:
+        avg_completion_hour = round(sum(completion_hours) / len(completion_hours))
+    
+    return {
+        "total_tasks": total,
+        "completed_tasks": completed,
+        "missed_tasks": missed,
+        "completion_rate": round(completed / total, 2) if total > 0 else 0,
+        "day_analysis": day_completion_rates,
+        "best_day": best_day,
+        "worst_day": worst_day,
+        "completion_time_pattern": {
+            "average_hour": avg_completion_hour,
+            "hours": completion_hours
+        },
+        "insights": generate_task_insights(day_completion_rates, missed, completed)
+    }
+
+
+def generate_task_insights(day_analysis: list, missed: int, completed: int) -> list:
+    """Generate AI insights based on task completion patterns."""
+    insights = []
+    
+    if missed > completed:
+        insights.append("⚠️ You miss more tasks than you complete. Consider reducing your workload or setting more realistic goals.")
+    
+    # Check for pattern in worst days
+    if day_analysis:
+        worst = day_analysis[0]
+        if worst["completion_rate"] < 0.5:
+            insights.append(f"📅 {worst['day']}s are challenging for you ({worst['completion_rate']:.0%} completion rate). Try scheduling important tasks on other days.")
+        
+        best = day_analysis[-1]
+        if best["completion_rate"] > 0.8:
+            insights.append(f"✨ {best['day']}s are your most productive days! Schedule high-priority tasks on {best['day']}s.")
+    
+    return insights
+
+
+def predict_task_completion(user_id: str, due_date: date, task_title: str = None) -> dict:
+    """
+    Predict the likelihood of completing a task on a specific date.
+    
+    Uses historical patterns to predict success probability.
+    """
+    analysis = analyze_task_completion_patterns(user_id, days=30)
+    
+    if "error" in analysis:
+        return {
+            "predicted_success": True,
+            "probability": 0.5,
+            "confidence": "low",
+            "reason": "Insufficient historical data"
+        }
+    
+    # Find completion rate for the specific day
+    due_day_name = due_date.strftime("%A")
+    day_rate = 0.5
+    for day_info in analysis["day_analysis"]:
+        if day_info["day"] == due_day_name:
+            day_rate = day_info["completion_rate"]
+            break
+    
+    # Base probability on historical pattern
+    base_prob = day_rate
+    
+    # Adjust for streak (if any)
+    recent_analysis = analyze_task_completion_patterns(user_id, days=7)
+    if "error" not in recent_analysis:
+        if recent_analysis["completion_rate"] > 0.7:
+            base_prob += 0.1  # Boost for recent good performance
+        elif recent_analysis["completion_rate"] < 0.3:
+            base_prob -= 0.1  # Penalty for recent poor performance
+    
+    # Clamp probability
+    predicted_prob = min(max(base_prob, 0), 1)
+    
+    # Determine confidence based on data quality
+    confidence = "low"
+    if analysis["total_tasks"] >= 20:
+        confidence = "high"
+    elif analysis["total_tasks"] >= 10:
+        confidence = "medium"
+    
+    # Generate reason
+    if predicted_prob >= 0.7:
+        reason = f"Your completion rate on {due_day_name}s is {day_rate:.0%}"
+    elif predicted_prob >= 0.4:
+        reason = f"You complete about {day_rate:.0%} of tasks on {due_day_name}s"
+    else:
+        reason = f"You often miss tasks on {due_day_name}s ({day_rate:.0%} completion rate)"
+    
+    return {
+        "predicted_success": predicted_prob > 0.5,
+        "probability": round(predicted_prob, 2),
+        "confidence": confidence,
+        "reason": reason,
+        "due_date": due_date.isoformat()
+    }
+
+
+def get_user_task_patterns(user_id: str) -> dict:
+    """
+    Get comprehensive task patterns for a user.
+    
+    This data is used by the AI coach to provide personalized recommendations.
+    """
+    short_term = analyze_task_completion_patterns(user_id, days=7)
+    medium_term = analyze_task_completion_patterns(user_id, days=30)
+    
+    return {
+        "short_term_patterns": short_term,
+        "medium_term_patterns": medium_term,
+        "prediction_model": "Available" if medium_term.get("total_tasks", 0) >= 10 else "Insufficient data"
     }

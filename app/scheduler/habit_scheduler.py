@@ -10,7 +10,8 @@ def run_daily_habit_check():
     """
 
     db = get_database()
-    today = datetime.utcnow().date()
+    today_utc = datetime.utcnow().date()
+    today_datetime = datetime.combine(today_utc, datetime.min.time())
 
     habits = db.habits.find({"is_active": True})
 
@@ -18,11 +19,11 @@ def run_daily_habit_check():
         habit_id = str(habit["_id"])
         user_id = habit["user_id"]
 
-        # Check if today already logged
+        # Check if already logged today in habit_occurrences
         existing = db.habit_occurrences.find_one({
             "habit_id": habit_id,
             "user_id": user_id,
-            "completed_date": today
+            "scheduled_date": today_datetime
         })
 
         if existing:
@@ -32,7 +33,8 @@ def run_daily_habit_check():
         db.habit_occurrences.insert_one({
             "habit_id": habit_id,
             "user_id": user_id,
-            "completed_date": today,
+            "scheduled_date": today_datetime,
+            "due_start": today_datetime,
             "status": "missed",
             "created_at": datetime.utcnow()
         })
