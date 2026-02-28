@@ -20,6 +20,14 @@ origins = [
     "http://127.0.0.1:3000",
     "http://localhost:5173",   # Vite frontend (if any)
     "http://127.0.0.1:5173",
+    "http://localhost:5174",   # Current Vite frontend port
+    "http://127.0.0.1:5174",
+    "http://localhost:5178",   # Common Vite port
+    "http://127.0.0.1:5178",
+    "http://localhost:3001",   # Alternative React port
+    "http://127.0.0.1:3001",
+    "http://localhost",        # Docker/nat
+    "http://127.0.0.1",
 ]
 
 app.add_middleware(
