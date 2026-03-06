@@ -32,42 +32,38 @@ def serialize(doc):
 @router.get("/", response_model=list[Habit])
 async def get_habits(current_user: str = Depends(get_current_user)):
     db = get_database()
-    # Use UTC date for consistency
     today_utc = datetime.utcnow().date()
     today_start = datetime.combine(today_utc, datetime.min.time())
     today_end = datetime.combine(today_utc, datetime.max.time())
-    
+
     habits = list(db.habits.find({"user_id": current_user}))
-    
-    # Add completedToday and missedToday status for each habit
+
     for habit in habits:
-        # Check if habit was logged today
         log = db.habit_logs.find_one({
             "habit_id": str(habit["_id"]),
             "user_id": current_user,
             "completed_date": {"$gte": today_start, "$lte": today_end}
         })
-        
+
         if log:
             habit["completedToday"] = log.get("completed", True)
             habit["missedToday"] = not log.get("completed", True)
         else:
             habit["completedToday"] = False
             habit["missedToday"] = False
-        
-        # Get yesterday's status (UTC)
+
         yesterday_utc = today_utc - timedelta(days=1)
         yesterday_start = datetime.combine(yesterday_utc, datetime.min.time())
         yesterday_end = datetime.combine(yesterday_utc, datetime.max.time())
-        
+
         yesterday_log = db.habit_logs.find_one({
             "habit_id": str(habit["_id"]),
             "user_id": current_user,
             "completed_date": {"$gte": yesterday_start, "$lte": yesterday_end}
         })
-        
+
         habit["completedYesterday"] = yesterday_log.get("completed", False) if yesterday_log else None
-    
+
     return [serialize(h) for h in habits]
 
 
@@ -124,7 +120,31 @@ async def update_habit(
 
 
 # ------------------------
-# LOG HABIT - Can log for today or specific date
+# DELETE HABIT
+# ------------------------
+@router.delete("/{habit_id}")
+async def delete_habit(
+    habit_id: str,
+    current_user: str = Depends(get_current_user)
+):
+    db = get_database()
+
+    if not ObjectId.is_valid(habit_id):
+        raise HTTPException(status_code=400, detail="Invalid habit id")
+
+    result = db.habits.delete_one({"_id": ObjectId(habit_id), "user_id": current_user})
+
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Habit not found")
+
+    db.habit_logs.delete_many({"habit_id": habit_id})
+    db.habit_occurrences.delete_many({"habit_id": habit_id})
+
+    return {"message": "Habit deleted"}
+
+
+# ------------------------
+# LOG HABIT - FIXED: Blocks re-logging today
 # ------------------------
 @router.post("/{habit_id}/log")
 async def log_habit(
@@ -135,15 +155,9 @@ async def log_habit(
     time_str: str = None,
     current_user: str = Depends(get_current_user)
 ):
-    """
-    Log a habit completion.
-    - If date_str is provided, logs for that specific date
-    - If date_str is not provided, logs for today (UTC)
-    - time_str can be provided to set specific completion time
-    """
     db = get_database()
-    
-    # Parse date - use provided date or today
+
+    # Parse target date
     if date_str:
         try:
             target_date = datetime.fromisoformat(date_str.replace('Z', '+00:00')).date()
@@ -151,8 +165,25 @@ async def log_habit(
             target_date = datetime.utcnow().date()
     else:
         target_date = datetime.utcnow().date()
-    
-    # Parse time if provided
+
+    today_utc = datetime.utcnow().date()
+    today_start = datetime.combine(today_utc, datetime.min.time())
+    today_end = datetime.combine(today_utc, datetime.max.time())
+
+    # 🚫 BLOCK: Prevent re-logging today if already logged
+    if target_date == today_utc:
+        already_logged = db.habit_logs.find_one({
+            "habit_id": habit_id,
+            "user_id": current_user,
+            "completed_date": {"$gte": today_start, "$lte": today_end}
+        })
+        if already_logged:
+            raise HTTPException(
+                status_code=400,
+                detail="Already logged today. Cannot change habit status for today."
+            )
+
+    # Parse time
     if time_str:
         try:
             time_parts = time_str.split(':')
@@ -163,19 +194,20 @@ async def log_habit(
             completed_at = datetime.utcnow()
     else:
         completed_at = datetime.utcnow()
-    
+
     target_start = datetime.combine(target_date, datetime.min.time())
     target_end = datetime.combine(target_date, datetime.max.time())
-    
-    # Check if log exists for target date - if yes, UPDATE; if no, INSERT
+
+    # Check existing log BEFORE updating
     existing_log = db.habit_logs.find_one({
         "habit_id": habit_id,
         "user_id": current_user,
         "completed_date": {"$gte": target_start, "$lte": target_end}
     })
-    
+
+    was_completed_before = existing_log and existing_log.get("completed", False)
+
     if existing_log:
-        # UPDATE existing log
         db.habit_logs.update_one(
             {"_id": existing_log["_id"]},
             {"$set": {
@@ -186,28 +218,24 @@ async def log_habit(
             }}
         )
     else:
-        # INSERT new log
-        habit_log = {
+        db.habit_logs.insert_one({
             "habit_id": habit_id,
             "user_id": current_user,
             "completed_date": completed_at,
             "completed": completed,
             "notes": notes,
             "created_at": datetime.utcnow()
-        }
-        db.habit_logs.insert_one(habit_log)
-    
-    # Update habit_occurrence for AI tracking
+        })
+
     scheduled_datetime = datetime.combine(target_date, datetime.min.time())
-    
+
     existing_occurrence = db.habit_occurrences.find_one({
         "habit_id": habit_id,
         "user_id": current_user,
         "scheduled_date": scheduled_datetime
     })
-    
+
     if existing_occurrence:
-        # UPDATE existing occurrence
         db.habit_occurrences.update_one(
             {"_id": existing_occurrence["_id"]},
             {"$set": {
@@ -218,7 +246,6 @@ async def log_habit(
             }}
         )
     else:
-        # INSERT new occurrence
         db.habit_occurrences.insert_one({
             "habit_id": habit_id,
             "user_id": current_user,
@@ -229,29 +256,32 @@ async def log_habit(
             "notes": notes,
             "created_at": datetime.utcnow()
         })
-    
-    # Update streak only if completed
-    if completed:
-        habit = db.habits.find_one({"_id": ObjectId(habit_id)})
-        if habit:
-            current_streak = habit.get("current_streak", 0)
-            longest_streak = habit.get("longest_streak", 0)
-            
+
+    # ✅ SMART STREAK: handle complete/uncomplete correctly
+    habit = db.habits.find_one({"_id": ObjectId(habit_id)})
+    if habit:
+        current_streak = habit.get("current_streak", 0)
+        longest_streak = habit.get("longest_streak", 0)
+
+        if completed and not was_completed_before:
+            # New completion today — increment streak
             new_streak = current_streak + 1
-            new_longest = longest_streak
-            if new_streak > longest_streak:
-                new_longest = new_streak
-            
+            new_longest = max(longest_streak, new_streak)
             db.habits.update_one(
                 {"_id": ObjectId(habit_id)},
-                {"$set": {
-                    "current_streak": new_streak,
-                    "longest_streak": new_longest
-                }}
+                {"$set": {"current_streak": new_streak, "longest_streak": new_longest}}
             )
-    
+        elif not completed and was_completed_before:
+            # Unmarking completion today — subtract streak point
+            new_streak = max(0, current_streak - 1)
+            db.habits.update_one(
+                {"_id": ObjectId(habit_id)},
+                {"$set": {"current_streak": new_streak}}
+            )
+        # else: no change
+
     return {
-        "message": "Habit logged successfully", 
+        "message": "Habit logged successfully",
         "status": "logged",
         "date": str(target_date),
         "time": completed_at.isoformat()
@@ -268,34 +298,42 @@ async def log_habit_for_date(
     date_str: str = None,
     current_user: str = Depends(get_current_user)
 ):
-    """Log habit for a specific date - ALWAYS creates new entry (no updates)"""
     db = get_database()
-    
-    # Parse date from string (required for this endpoint)
+
     if date_str:
         try:
             target_date = datetime.fromisoformat(date_str).date()
         except:
-            from datetime import datetime
             target_date = datetime.utcnow().date()
     else:
-        from datetime import datetime
         target_date = datetime.utcnow().date()
-    
-    # ALWAYS create new entry - no update logic
-    # Convert date to datetime for MongoDB compatibility
+
+    # 🚫 BLOCK: Prevent re-logging today
+    today_utc = datetime.utcnow().date()
+    if target_date == today_utc:
+        today_start = datetime.combine(today_utc, datetime.min.time())
+        today_end = datetime.combine(today_utc, datetime.max.time())
+        already_logged = db.habit_logs.find_one({
+            "habit_id": habit_id,
+            "user_id": current_user,
+            "completed_date": {"$gte": today_start, "$lte": today_end}
+        })
+        if already_logged:
+            raise HTTPException(
+                status_code=400,
+                detail="Already logged today. Cannot change habit status for today."
+            )
+
     target_datetime = datetime.combine(target_date, datetime.min.time())
-    
-    habit_log = {
+
+    db.habit_logs.insert_one({
         "habit_id": habit_id,
         "user_id": current_user,
         "completed_date": datetime.utcnow(),
         "completed": log.completed,
         "notes": log.notes,
-    }
-    db.habit_logs.insert_one(habit_log)
-    
-    # Create habit_occurrence for AI tracking
+    })
+
     db.habit_occurrences.insert_one({
         "habit_id": habit_id,
         "user_id": current_user,
@@ -305,32 +343,24 @@ async def log_habit_for_date(
         "completed_at": datetime.utcnow(),
         "notes": log.notes
     })
-    
-    # Update streak if completed
+
     if log.completed:
         habit = db.habits.find_one({"_id": ObjectId(habit_id)})
         if habit:
             current_streak = habit.get("current_streak", 0)
             longest_streak = habit.get("longest_streak", 0)
-            
             new_streak = current_streak + 1
-            new_longest = longest_streak
-            if new_streak > longest_streak:
-                new_longest = new_streak
-            
+            new_longest = max(longest_streak, new_streak)
             db.habits.update_one(
                 {"_id": ObjectId(habit_id)},
-                {"$set": {
-                    "current_streak": new_streak,
-                    "longest_streak": new_longest
-                }}
+                {"$set": {"current_streak": new_streak, "longest_streak": new_longest}}
             )
-    
+
     return {"message": f"Habit logged for {target_date}", "status": "logged", "date": str(target_date)}
 
 
 # ------------------------
-# MARK HABIT AS MISSED
+# MARK HABIT AS MISSED - Smart streak with grace period
 # ------------------------
 @router.post("/{habit_id}/missed")
 async def mark_habit_missed(
@@ -338,77 +368,85 @@ async def mark_habit_missed(
     current_user: str = Depends(get_current_user)
 ):
     db = get_database()
-    
-    # Use UTC date for consistency
+
     today_utc = datetime.utcnow().date()
     today_start = datetime.combine(today_utc, datetime.min.time())
     today_end = datetime.combine(today_utc, datetime.max.time())
-    
-    # Check habit_logs first
-    existing_log = db.habit_logs.find_one({
+
+    # 🚫 BLOCK: Prevent re-missing today if already logged
+    already_logged = db.habit_logs.find_one({
         "habit_id": habit_id,
         "user_id": current_user,
         "completed_date": {"$gte": today_start, "$lte": today_end}
     })
-    
-    if existing_log:
-        # Update existing log to missed
-        db.habit_logs.update_one(
-            {"_id": existing_log["_id"]},
-            {"$set": {"completed": False, "notes": "Marked as missed"}}
+    if already_logged:
+        raise HTTPException(
+            status_code=400,
+            detail="Already logged today. Cannot change habit status for today."
         )
-    else:
-        # Create a missed log
-        habit_log = {
-            "habit_id": habit_id,
-            "user_id": current_user,
-            "completed_date": datetime.utcnow(),
-            "completed": False,
-            "notes": "Marked as missed",
-        }
-        db.habit_logs.insert_one(habit_log)
-    
-    # Update/create habit_occurrence for AI tracking
-    # Convert date to datetime for MongoDB compatibility
-    scheduled_datetime = datetime.combine(today_utc, datetime.min.time())
-    
-    existing_occurrence = db.habit_occurrences.find_one({
+
+    # Log the miss
+    db.habit_logs.insert_one({
         "habit_id": habit_id,
         "user_id": current_user,
-        "scheduled_date": scheduled_datetime
+        "completed_date": datetime.utcnow(),
+        "completed": False,
+        "notes": "Marked as missed",
     })
+
+    scheduled_datetime = datetime.combine(today_utc, datetime.min.time())
+    db.habit_occurrences.insert_one({
+        "habit_id": habit_id,
+        "user_id": current_user,
+        "scheduled_date": scheduled_datetime,
+        "due_start": datetime.utcnow(),
+        "status": "missed",
+        "completed_at": None,
+        "notes": "Marked as missed"
+    })
+
+    # ✅ SMART STREAK: grace period
+    habit = db.habits.find_one({"_id": ObjectId(habit_id)})
+    streak_reset = False
+    new_streak = 0
     
-    if existing_occurrence:
-        # Update existing occurrence to missed
-        db.habit_occurrences.update_one(
-            {"_id": existing_occurrence["_id"]},
-            {"$set": {
-                "status": "missed",
-                "completed_at": None,
-                "notes": "Marked as missed"
-            }}
-        )
-    else:
-        # Create new occurrence record as missed
-        db.habit_occurrences.insert_one({
+    if habit:
+        current_streak = habit.get("current_streak", 0)
+
+        # Check yesterday
+        yesterday_utc = today_utc - timedelta(days=1)
+        yesterday_start = datetime.combine(yesterday_utc, datetime.min.time())
+        yesterday_end = datetime.combine(yesterday_utc, datetime.max.time())
+
+        yesterday_log = db.habit_logs.find_one({
             "habit_id": habit_id,
             "user_id": current_user,
-            "scheduled_date": scheduled_datetime,
-            "due_start": datetime.utcnow(),
-            "status": "missed",
-            "completed_at": None,
-            "notes": "Marked as missed"
+            "completed_date": {"$gte": yesterday_start, "$lte": yesterday_end}
         })
-    
-    # Reset streak
-    habit = db.habits.find_one({"_id": ObjectId(habit_id)})
-    if habit:
+
+        yesterday_missed = yesterday_log and not yesterday_log.get("completed", True)
+        yesterday_no_log = not yesterday_log
+
+        if yesterday_missed or (yesterday_no_log and current_streak == 0):
+            # 2 consecutive misses or already at 0 — reset
+            new_streak = 0
+            streak_reset = True
+        else:
+            # First miss — grace period, keep streak
+            new_streak = current_streak
+            streak_reset = False
+
         db.habits.update_one(
             {"_id": ObjectId(habit_id)},
-            {"$set": {"current_streak": 0}}
+            {"$set": {"current_streak": new_streak}}
         )
-    
-    return {"message": "Habit marked as missed", "status": "missed", "streak_reset": True}
+
+    return {
+        "message": "Habit marked as missed",
+        "status": "missed",
+        "streak_reset": streak_reset,
+        "current_streak": new_streak
+    }
 
 
 # ------------------------
@@ -437,17 +475,15 @@ async def habit_analysis(
 
 
 # ------------------------
-# HABIT PREDICTION (AI/ML)
+# AI ENDPOINTS
 # ------------------------
 @router.get("/{habit_id}/ai/predict")
 async def predict_habit_success(
     habit_id: str,
     current_user: str = Depends(get_current_user)
 ):
-    """Predict the probability of successfully completing a habit."""
     if not ObjectId.is_valid(habit_id):
         raise HTTPException(status_code=400, detail="Invalid habit id")
-    
     result = predict_success(habit_id, current_user)
     return result
 
@@ -457,10 +493,8 @@ async def get_optimal_completion_time(
     habit_id: str,
     current_user: str = Depends(get_current_user)
 ):
-    """Find the optimal time of day to complete a habit."""
     if not ObjectId.is_valid(habit_id):
         raise HTTPException(status_code=400, detail="Invalid habit id")
-    
     result = get_optimal_time(habit_id, current_user)
     return result
 
@@ -470,10 +504,8 @@ async def get_hard_days(
     habit_id: str,
     current_user: str = Depends(get_current_user)
 ):
-    """Identify days of the week that are most difficult for a habit."""
     if not ObjectId.is_valid(habit_id):
         raise HTTPException(status_code=400, detail="Invalid habit id")
-    
     result = get_difficult_days(habit_id, current_user)
     return result
 
@@ -483,15 +515,11 @@ async def train_habit_model(
     habit_id: str,
     current_user: str = Depends(get_current_user)
 ):
-    """Train the ML model on habit occurrence data."""
     if not ObjectId.is_valid(habit_id):
         raise HTTPException(status_code=400, detail="Invalid habit id")
-    
     result = train_classifier(habit_id=habit_id, user_id=current_user)
-    
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
-    
     return {
         "message": "Model trained successfully",
         "train_accuracy": result["train_accuracy"],
@@ -505,15 +533,12 @@ async def get_ai_stats(
     habit_id: str,
     current_user: str = Depends(get_current_user)
 ):
-    """Get comprehensive AI analysis stats for a habit."""
     if not ObjectId.is_valid(habit_id):
         raise HTTPException(status_code=400, detail="Invalid habit id")
-    
     analysis = analyze_habit(habit_id, current_user)
     prediction = predict_success(habit_id, current_user)
     optimal = get_optimal_time(habit_id, current_user)
     difficult = get_difficult_days(habit_id, current_user)
-    
     return {
         "analysis": analysis,
         "prediction": prediction,
@@ -524,7 +549,6 @@ async def get_ai_stats(
 
 @router.get("/ai/welcome")
 async def get_ai_welcome(current_user: str = Depends(get_current_user)):
-    """Get welcome message for first-time AI users."""
     from app.ai.habit_coach import generate_ai_welcome_message
     return generate_ai_welcome_message()
 
@@ -534,17 +558,13 @@ async def get_ai_suggestions(
     habit_id: str,
     current_user: str = Depends(get_current_user)
 ):
-    """Get smart AI-powered suggestions based on all available data."""
     from app.ai.habit_coach import generate_smart_suggestions
-    
     if not ObjectId.is_valid(habit_id):
         raise HTTPException(status_code=400, detail="Invalid habit id")
-    
     analysis = analyze_habit(habit_id, current_user)
     prediction = predict_success(habit_id, current_user)
     optimal = get_optimal_time(habit_id, current_user)
     difficult = get_difficult_days(habit_id, current_user)
-    
     if not analysis:
         return {
             "suggestions": [{
@@ -555,17 +575,12 @@ async def get_ai_suggestions(
             }],
             "summary": "No data yet - start building your habit history!"
         }
-    
     return generate_smart_suggestions(habit_id, current_user, analysis, prediction, optimal, difficult)
 
 
-# ------------------------
-# LEGACY PREDICTION ENDPOINT
-# ------------------------
 @router.get("/{habit_id}/prediction")
 async def habit_prediction(
     habit_id: str,
     current_user: str = Depends(get_current_user)
 ):
-    """Legacy prediction endpoint - redirects to AI predict."""
     return await predict_habit_success(habit_id, current_user)
