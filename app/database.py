@@ -1,36 +1,37 @@
-# app/database.py
-
-from pymongo import MongoClient
+from pymongo import MongoClient, ASCENDING
 from app.config import settings
+import logging
 
+logger = logging.getLogger(__name__)
 client = None
 db = None
 
 def get_database():
-    """
-    Returns the MongoDB database object.
-    Initializes the client if not already connected.
-    """
     global client, db
-
     if db is None:
-        # Create the client
         client = MongoClient(settings.MONGODB_URI)
-        
-        # Extract the database name from URI or use default
-        if client.get_default_database() is not None:
+        try:
             db = client.get_default_database()
-        else:
-            # Fallback if URI has no database, use 'focusforge'
-            db = client['focusforge']
-
-        print(f"MongoDB connected successfully: {db.name}")
-
+        except Exception:
+            db = client[settings.DB_NAME]
+        logger.info(f"MongoDB connected: {db.name}")
     return db
 
 async def init_db():
-    """
-    Async placeholder for any DB initialization tasks.
-    Currently, just ensures connection.
-    """
-    get_database()
+    database = get_database()
+
+    def safe_index(collection, keys, **kwargs):
+        try:
+            collection.create_index(keys, **kwargs)
+        except Exception as e:
+            logger.warning(f"Index skipped: {e}")
+
+    safe_index(database.habits, [("user_id", ASCENDING)])
+    safe_index(database.tasks, [("user_id", ASCENDING)])
+    safe_index(database.habit_occurrences, [("user_id", ASCENDING)])
+    safe_index(database.habit_occurrences, [("habit_id", ASCENDING)])
+    safe_index(database.user_ai_context, [("user_id", ASCENDING)], unique=True)
+    safe_index(database.users, [("email", ASCENDING)], unique=True)
+    safe_index(database.users, [("username", ASCENDING)], unique=True)
+
+    logger.info("✅ MongoDB indexes created")
