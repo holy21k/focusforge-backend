@@ -535,11 +535,11 @@ def generate_task_insights(day_analysis: list, missed: int, completed: int) -> l
     
     # Check for pattern in worst days
     if day_analysis:
-        worst = day_analysis[0]
+        best = day_analysis[0]
+        worst = day_analysis[-1]
         if worst["completion_rate"] < 0.5:
             insights.append(f"📅 {worst['day']}s are challenging for you ({worst['completion_rate']:.0%} completion rate). Try scheduling important tasks on other days.")
         
-        best = day_analysis[-1]
         if best["completion_rate"] > 0.8:
             insights.append(f"✨ {best['day']}s are your most productive days! Schedule high-priority tasks on {best['day']}s.")
     

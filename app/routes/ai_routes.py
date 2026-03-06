@@ -3,27 +3,36 @@ AI Discipline Coach Routes for FocusForge
 Provides real predictions, failure risk analysis, and discipline guidance
 """
 from fastapi import APIRouter, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.services.prediction_service import (
     analyze_user_behavior,
     predict_success_probability,
     get_personalized_insights,
     generate_discipline_recommendation
 )
+from app.services.auth_service import verify_token
 from app.ai.habit_analyzer import (
     analyze_task_completion_patterns,
     predict_task_completion,
     get_user_task_patterns
 )
 from datetime import datetime, timedelta, date
-from app.routes.auth_routes import get_current_user
 from typing import Optional
 
 router = APIRouter(prefix="/ai", tags=["AI Discipline Coach"])
 
+optional_security = HTTPBearer(auto_error=False)
 
-def get_optional_user(current_user: Optional[str] = Depends(get_current_user)):
-    """Return user_id if authenticated, None if not"""
-    return current_user
+def get_optional_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(optional_security)
+):
+    """Return user_id if authenticated, None if not."""
+    if not credentials or not credentials.credentials:
+        return None
+    payload = verify_token(credentials.credentials)
+    if not payload:
+        return None
+    return payload.get("sub")
 
 
 @router.get("/coach/status")
@@ -281,7 +290,7 @@ def get_tomorrow_coach_message(analysis, avg_probability, high_risk_count):
 @router.get("/coach/task-patterns")
 async def get_task_patterns(
     days: int = 30,
-    current_user: Optional[str] = Depends(get_current_user)
+    current_user: Optional[str] = Depends(get_optional_user)
 ):
     """
     Get AI analysis of task completion patterns.
@@ -311,7 +320,7 @@ async def get_task_patterns(
 async def predict_task_completion_route(
     due_date: str,
     task_title: str = None,
-    current_user: Optional[str] = Depends(get_current_user)
+    current_user: Optional[str] = Depends(get_optional_user)
 ):
     """
     Predict the likelihood of completing a task on a specific date.
@@ -346,7 +355,7 @@ async def predict_task_completion_route(
 
 @router.get("/coach/user-patterns")
 async def get_all_user_patterns(
-    current_user: Optional[str] = Depends(get_current_user)
+    current_user: Optional[str] = Depends(get_optional_user)
 ):
     """
     Get comprehensive task and habit patterns for the user.
